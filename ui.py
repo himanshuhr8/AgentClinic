@@ -1,5 +1,6 @@
 import streamlit as st
 import json
+from agentclinic import ui_main  # Assuming this is the location of the ui_main function.
 
 st.set_page_config(page_title="Agentic AI - Medical OSCE Diagnosis", layout="wide")
 
@@ -90,17 +91,141 @@ if scenario:
         st.json(osce["Physical_Examination_Findings"])
     with st.expander("Test Results"):
         st.json(osce["Test_Results"])
+gemini_api_key = st.secrets["GEMINI_API_KEY"]
+if st.button("🤖 Run Agent Diagnosis"):
+    with st.spinner("Agent is thinking..."):
+        try:
+            # Configuration parameters
+            gemini_api_key = gemini_api_key
+            doctor_llm = "gemini-2.0-flash"
+            patient_llm = "gemini-2.0-flash"
+            measurement_llm = "gemini-2.0-flash"
+            moderator_llm = "gemini-2.0-flash"
+            inf_type = "agent"
+            doctor_bias = False
+            patient_bias = False
+            img_request = False
+            total_inferences = 5
+            replicate_api_key = None
+            openai_api_key = None
+            anthropic_api_key = None
+            num_scenarios = 1
 
-    # Run agent button
-    if st.button("🤖 Run Agent Diagnosis"):
-        with st.spinner("Agent is thinking..."):
-            # Simulate agent output (replace with real API call later)
-            for i in range(1, 6):
-                st.markdown(f"**Doctor [{i*20}%]:** Agent reasoning step {i}...")
-                st.markdown(f"**Patient [{i*20}%]:** Simulated patient response based on scenario.")
+            # Run the agent-based inference system
+            result = ui_main(
+                scenario_dict=scenario,
+                gemini_api_key=gemini_api_key,
+                api_key=openai_api_key,
+                replicate_api_key=replicate_api_key,
+                inf_type=inf_type,
+                doctor_bias=doctor_bias,
+                patient_bias=patient_bias,
+                doctor_llm=doctor_llm,
+                patient_llm=patient_llm,
+                measurement_llm=measurement_llm,
+                moderator_llm=moderator_llm,
+                num_scenarios=num_scenarios,
+                img_request=img_request,
+                total_inferences=total_inferences,
+                anthropic_api_key=anthropic_api_key
+            )
 
-            st.success("✅ Diagnosis Ready: **Myasthenia Gravis**")
+            # ✅ Show final diagnosis
+            # ✅ Show final diagnosis
+            st.success(f"✅ Diagnosis Ready: **{result['Diagnosis']}**")
             st.markdown("> This diagnosis was generated based on patient symptoms, physical exam, and test findings using agentic step-wise inference.")
+
+            # 💬 Show doctor-patient chat conversation
+            # 💬 Show doctor-patient chat conversation (Enhanced UI)
+            st.subheader("💬 Conversation")
+
+            # Custom CSS for left-right chat alignment
+            st.markdown("""
+            <style>
+            .chat-container {
+                display: flex;
+                margin-bottom: 1rem;
+            }
+            .chat-left {
+                justify-content: flex-start;
+            }
+            .chat-right {
+                justify-content: flex-end;
+            }
+            .bubble {
+                padding: 0.7rem 1rem;
+                border-radius: 1rem;
+                max-width: 65%;
+                font-size: 0.95rem;
+                line-height: 1.4;
+                box-shadow: 0px 1px 4px rgba(0,0,0,0.15);
+                color: black; /* <-- Ensure black text */
+            }
+            .doctor {
+                background-color: #e0f2ff;
+                border-top-left-radius: 0;
+            }
+            .patient {
+                background-color: #e6f9e9;
+                border-top-right-radius: 0;
+            }
+            .other {
+                background-color: #f2f2f2;
+                border-top-left-radius: 0;
+            }
+            .speaker-label {
+                font-size: 0.8rem;
+                color: #666;
+                margin-bottom: 0.3rem;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+
+
+            # Loop through steps and align based on role
+            for step in result.get("Reasoning", []):
+                role = step["step"].lower()
+                text = step["details"]
+
+                if "doctor" in role:
+                    alignment = "chat-left"
+                    role_class = "doctor"
+                    label = "🧑‍⚕️ Doctor"
+                elif "patient" in role:
+                    alignment = "chat-right"
+                    role_class = "patient"
+                    label = "🧍 Patient"
+                elif "measurement" in role:
+                    alignment = "chat-left"
+                    role_class = "other"
+                    label = "📊 Measurement"
+                elif "moderator" in role:
+                    alignment = "chat-left"
+                    role_class = "other"
+                    label = "🧑‍💼 Moderator"
+                else:
+                    alignment = "chat-left"
+                    role_class = "other"
+                    label = "🤖 System"
+
+                st.markdown(f"""
+                <div class="chat-container {alignment}">
+                    <div class="bubble {role_class}">
+                        <div class="speaker-label">{label}</div>
+                        {text}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+
+            # 💡 Show reasoning steps again (optional)
+            with st.expander("🧠 Diagnostic Reasoning Steps (Raw Logs)"):
+                for step in result["Reasoning"]:
+                    st.markdown(f"- **{step['step']}**: {step['details']}")
+
+
+        except Exception as e:
+            st.error(f"An error occurred during inference: {e}")
+
 else:
     st.warning("Please select 'Use Sample Case' or upload a scenario JSON file.")
-

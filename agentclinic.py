@@ -252,6 +252,34 @@ class ScenarioLoaderMedQA:
         if id is None: return self.sample_scenario()
         return self.scenarios[id]
         
+class SingleScenarioLoader:
+    def __init__(self, scenario_dicts) -> None:
+        print("[DEBUG] Type of scenario_dicts:", type(scenario_dicts))
+        
+        if isinstance(scenario_dicts, dict):
+            print("[DEBUG] scenario_dicts is a single dict, wrapping in list")
+            scenario_dicts = [scenario_dicts]
+        
+        for i, s in enumerate(scenario_dicts):
+            print(f"[DEBUG] Scenario {i} type: {type(s)}")
+            print(f"[DEBUG] Scenario {i} content preview: {str(s)[:100]}")  # just show first 100 chars
+
+        try:
+            self.scenarios = [ScenarioMedQA(s) for s in scenario_dicts]
+        except Exception as e:
+            print("[ERROR] Failed to parse scenarios in ScenarioMedQA:", e)
+            raise
+        
+        self.num_scenarios = len(self.scenarios)
+
+    def sample_scenario(self):
+        return self.scenarios[random.randint(0, self.num_scenarios - 1)]
+    
+    def get_scenario(self, id):
+        if id is None:
+            return self.sample_scenario()
+        return self.scenarios[id]
+
 
 
 class ScenarioMedQAExtended:
@@ -645,7 +673,7 @@ def main(gemini_api_key,api_key, replicate_api_key, inf_type, doctor_bias, patie
         os.environ["ANTHROPIC_API_KEY"] = anthropic_api_key
 
     print("[DEBUG] Loading dataset:", dataset)  # 🐞 DEBUG
-
+  
     if dataset == "MedQA":
         scenario_loader = ScenarioLoaderMedQA()
     elif dataset == "MedQA_Ext":
@@ -660,7 +688,8 @@ def main(gemini_api_key,api_key, replicate_api_key, inf_type, doctor_bias, patie
         raise Exception("Dataset {} does not exist".format(str(dataset)))
 
     print("[DEBUG] Dataset loaded. Total scenarios:", scenario_loader.num_scenarios)  # 🐞 DEBUG
-
+    
+   
     total_correct = 0
     total_presents = 0
 
@@ -731,6 +760,118 @@ def main(gemini_api_key,api_key, replicate_api_key, inf_type, doctor_bias, patie
                 meas_agent.add_hist(pi_dialogue)
 
             time.sleep(1.0)
+
+def ui_main(gemini_api_key, scenario_dict, api_key, replicate_api_key, inf_type, doctor_bias, patient_bias,
+            doctor_llm, patient_llm, measurement_llm, moderator_llm, num_scenarios, img_request,
+            total_inferences, anthropic_api_key=None):
+    
+    print("[DEBUG] Entered main()")  # 🐞 DEBUG
+
+    if api_key:
+        openai.api_key = api_key
+    if gemini_api_key:
+        genai.configure(api_key=gemini_api_key)
+    anthropic_llms = ["claude3.5sonnet"]
+    replicate_llms = ["llama-3-70b-instruct", "llama-2-70b-chat", "mixtral-8x7b"]
+
+    if patient_llm in replicate_llms or doctor_llm in replicate_llms:
+        print("[DEBUG] Using replicate model")  # 🐞 DEBUG
+        os.environ["REPLICATE_API_TOKEN"] = replicate_api_key
+
+    if doctor_llm in anthropic_llms:
+        print("[DEBUG] Using anthropic model")  # 🐞 DEBUG
+        os.environ["ANTHROPIC_API_KEY"] = anthropic_api_key
+
+    scenario_loader = SingleScenarioLoader(scenario_dict)
+    print("[DEBUG] Dataset loaded. Total scenarios:", scenario_loader.num_scenarios)  # 🐞 DEBUG
+
+    total_correct = 0
+    total_presents = 0
+
+    if "HF_" in moderator_llm:
+        print("[DEBUG] Loading HuggingFace model:", moderator_llm)  # 🐞 DEBUG
+        pipe = load_huggingface_model(moderator_llm.replace("HF_", ""))
+    else:
+        pipe = None
+
+    if num_scenarios is None:
+        num_scenarios = scenario_loader.num_scenarios
+
+    for _scenario_id in range(0, min(num_scenarios, scenario_loader.num_scenarios)):
+        print(f"\n[DEBUG] Starting scenario {_scenario_id + 1}/{num_scenarios}")  # 🐞 DEBUG
+
+        total_presents += 1
+        pi_dialogue = str()
+        scenario = scenario_loader.get_scenario(id=_scenario_id)
+        print("[DEBUG] Scenario loaded")  # 🐞 DEBUG
+
+        # Initialize agents
+        meas_agent = MeasurementAgent(scenario=scenario, backend_str=measurement_llm)
+        patient_agent = PatientAgent(scenario=scenario, bias_present=patient_bias, backend_str=patient_llm)
+        doctor_agent = DoctorAgent(scenario=scenario, bias_present=doctor_bias, backend_str=doctor_llm,
+                                   max_infs=total_inferences, img_request=img_request)
+
+        doctor_dialogue = ""
+        reasoning_steps = []  # ✅ Track full dialogue
+
+        for _inf_id in range(total_inferences):
+            print(f"[DEBUG] Inference {_inf_id + 1}/{total_inferences}")  # 🐞 DEBUG
+            imgs = False
+
+            if _inf_id == total_inferences - 1:
+                pi_dialogue += "This is the final question. Please provide a diagnosis.\n"
+
+            if inf_type == "human_doctor":
+                doctor_dialogue = input("\nQuestion for patient: ")
+            else:
+                doctor_dialogue = doctor_agent.inference_doctor(pi_dialogue, image_requested=imgs)
+
+            reasoning_steps.append({"step": f"Doctor Inference {_inf_id + 1}", "details": doctor_dialogue})
+            print("Doctor [{}%]:".format(int(((_inf_id + 1) / total_inferences) * 100)), doctor_dialogue)
+
+            if "DIAGNOSIS READY" in doctor_dialogue:
+                print("[DEBUG] Doctor made a diagnosis")  # 🐞 DEBUG
+                correctness = compare_results(doctor_dialogue, scenario.diagnosis_information(), moderator_llm, pipe) == "yes"
+                if correctness:
+                    total_correct += 1
+                print("\nCorrect answer:", scenario.diagnosis_information())
+                print("Scene {}, The diagnosis was ".format(_scenario_id), "CORRECT" if correctness else "INCORRECT", int((total_correct / total_presents) * 100))
+
+                return {
+                    "Diagnosis": doctor_dialogue,
+                    "Reasoning": reasoning_steps
+                }
+
+            if "REQUEST TEST" in doctor_dialogue:
+                print("[DEBUG] Doctor requested a test")  # 🐞 DEBUG
+                pi_dialogue = meas_agent.inference_measurement(doctor_dialogue)
+                print("Measurement [{}%]:".format(int(((_inf_id + 1) / total_inferences) * 100)), pi_dialogue)
+                patient_agent.add_hist(pi_dialogue)
+            else:
+                if inf_type == "human_patient":
+                    pi_dialogue = input("\nResponse to doctor: ")
+                else:
+                    pi_dialogue = patient_agent.inference_patient(doctor_dialogue)
+
+                reasoning_steps.append({"step": f"Patient Response {_inf_id + 1}", "details": pi_dialogue})
+                print("Patient [{}%]:".format(int(((_inf_id + 1) / total_inferences) * 100)), pi_dialogue)
+                meas_agent.add_hist(pi_dialogue)
+
+            time.sleep(1.0)
+
+        # ✅ If loop ends without diagnosis
+        final_diag = next((step["details"] for step in reasoning_steps if "DIAGNOSIS READY" in step["details"]), None)
+        if final_diag:
+            diagnosis = final_diag
+        else:
+            diagnosis = "Diagnosis was not completed."
+
+        return {
+            "Diagnosis": diagnosis,
+            "Reasoning": reasoning_steps
+        }
+
+
 
 
 if __name__ == "__main__":
