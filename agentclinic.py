@@ -2,6 +2,7 @@ import argparse
 import anthropic
 from transformers import pipeline
 import openai, re, random, time, json, replicate, os
+import google.generativeai as genai
 
 llama2_url = "meta/llama-2-70b-chat"
 llama3_url = "meta/meta-llama-3-70b-instruct"
@@ -18,7 +19,7 @@ def inference_huggingface(prompt, pipe):
 
 
 def query_model(model_str, prompt, system_prompt, tries=30, timeout=20.0, image_requested=False, scene=None, max_prompt_len=2**14, clip_prompt=False):
-    if model_str not in ["gpt4", "gpt3.5", "gpt4o", 'llama-2-70b-chat', "mixtral-8x7b", "gpt-4o-mini", "llama-3-70b-instruct", "gpt4v", "claude3.5sonnet", "o1-preview"] and "_HF" not in model_str:
+    if model_str not in ["gpt4", "gpt3.5", "gpt4o", 'llama-2-70b-chat', "mixtral-8x7b", "gpt-4o-mini", "llama-3-70b-instruct", "gpt4v", "claude3.5sonnet", "o1-preview","gemini-2.0-flash"] and "_HF" not in model_str:
         raise Exception("No model by the name {}".format(model_str))
     for _ in range(tries):
         if clip_prompt: prompt = prompt[:max_prompt_len]
@@ -113,14 +114,22 @@ def query_model(model_str, prompt, system_prompt, tries=30, timeout=20.0, image_
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}]
-                response = openai.ChatCompletion.create(
+                try:
+                    print("Calling OpenAI API for gpt-3.5...")
+                    response = openai.ChatCompletion.create(
                         model="gpt-3.5-turbo",
                         messages=messages,
                         temperature=0.05,
                         max_tokens=200,
+                        timeout=10,
                     )
-                answer = response["choices"][0]["message"]["content"]
-                answer = re.sub("\s+", " ", answer)
+                    print("Response received.")
+                    answer = response["choices"][0]["message"]["content"]
+                    answer = re.sub("\s+", " ", answer)
+                except Exception as e:
+                    print(f"[ERROR calling gpt3.5] {str(e)}")
+                    raise
+
             elif model_str == "claude3.5sonnet":
                 client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
                 message = client.messages.create(
@@ -165,6 +174,32 @@ def query_model(model_str, prompt, system_prompt, tries=30, timeout=20.0, image_
                         "max_new_tokens": 200})
                 answer = ''.join(output)
                 answer = re.sub("\s+", " ", answer)
+            elif model_str == "gemini-2.0-flash":
+                try:
+                    # Initialize the model
+                    model = genai.GenerativeModel("gemini-2.0-flash")
+                    
+                    # Prepare the prompt (system and user)
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ]
+                    
+                    # Generate the response
+                    response = model.generate_content(system_prompt + "\n" + prompt)
+                    
+                    # Extract answer from response (ensure that it's processed similarly to others)
+                    answer = response.text
+                    answer = re.sub(r"\s+", " ", answer)  # Clean up the answer
+
+                    return answer
+
+                except Exception as e:
+                    # Log the error and raise the exception
+                    print(f"[ERROR calling gemini-2.0-flash] {str(e)}")
+                    raise
+
+
             elif "HF_" in model_str:
                 input_text = system_prompt + prompt 
                 #if self.pipe is None:
@@ -510,12 +545,36 @@ class DoctorAgent:
         return ""
 
     def inference_doctor(self, question, image_requested=False) -> str:
-        answer = str()
-        if self.infs >= self.MAX_INFS: return "Maximum inferences reached"
-        answer = query_model(self.backend, "\nHere is a history of your dialogue: " + self.agent_hist + "\n Here was the patient response: " + question + "Now please continue your dialogue\nDoctor: ", self.system_prompt(), image_requested=image_requested, scene=self.scenario)
+        if self.infs >= self.MAX_INFS:
+            print("[DEBUG] Maximum number of inferences reached.")
+            return "Maximum inferences reached"
+
+        print(f"[DEBUG] Doctor inference #{self.infs+1}/{self.MAX_INFS}")
+        print("[DEBUG] Preparing system prompt...")
+        sys_prompt = self.system_prompt()
+
+        print("[DEBUG] System prompt ready.")
+        print("[DEBUG] Calling query_model() with backend:", self.backend)
+
+        try:
+            answer = query_model(
+                self.backend,
+                "\nHere is a history of your dialogue: " + self.agent_hist +
+                "\n Here was the patient response: " + question +
+                "Now please continue your dialogue\nDoctor: ",
+                sys_prompt,
+                image_requested=image_requested,
+                scene=self.scenario
+            )
+        except Exception as e:
+            print("[ERROR] query_model threw an exception:", e)
+            raise
+
+        print("[DEBUG] Received doctor response from model.")
         self.agent_hist += question + "\n\n" + answer + "\n\n"
         self.infs += 1
         return answer
+
 
     def system_prompt(self) -> str:
         bias_prompt = ""
@@ -567,10 +626,13 @@ def compare_results(diagnosis, correct_diagnosis, moderator_llm, mod_pipe):
     return answer.lower()
 
 
-def main(api_key, replicate_api_key, inf_type, doctor_bias, patient_bias, doctor_llm, patient_llm, measurement_llm, moderator_llm, num_scenarios, dataset, img_request, total_inferences, anthropic_api_key=None):
+def main(gemini_api_key,api_key, replicate_api_key, inf_type, doctor_bias, patient_bias, doctor_llm, patient_llm, measurement_llm, moderator_llm, num_scenarios, dataset, img_request, total_inferences, anthropic_api_key=None):
     print("[DEBUG] Entered main()")  # 🐞 DEBUG
     
-    openai.api_key = api_key
+    if api_key:
+        openai.api_key = api_key
+    if gemini_api_key:
+        genai.configure(api_key=gemini_api_key)
     anthropic_llms = ["claude3.5sonnet"]
     replicate_llms = ["llama-3-70b-instruct", "llama-2-70b-chat", "mixtral-8x7b"]
 
@@ -673,6 +735,7 @@ def main(api_key, replicate_api_key, inf_type, doctor_bias, patient_bias, doctor
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Medical Diagnosis Simulation CLI')
+    parser.add_argument('--gemini_api_key', type=str, default=None, required=False, help='Gemini API key for Gemini-Pro')
     parser.add_argument('--openai_api_key', type=str, required=False, help='OpenAI API Key')
     parser.add_argument('--replicate_api_key', type=str, required=False, help='Replicate API Key')
     parser.add_argument('--inf_type', type=str, choices=['llm', 'human_doctor', 'human_patient'], default='llm')
@@ -690,4 +753,4 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
 
-    main(args.openai_api_key, args.replicate_api_key, args.inf_type, args.doctor_bias, args.patient_bias, args.doctor_llm, args.patient_llm, args.measurement_llm, args.moderator_llm, args.num_scenarios, args.agent_dataset, args.doctor_image_request, args.total_inferences, args.anthropic_api_key)
+    main(args.gemini_api_key,args.openai_api_key, args.replicate_api_key, args.inf_type, args.doctor_bias, args.patient_bias, args.doctor_llm, args.patient_llm, args.measurement_llm, args.moderator_llm, args.num_scenarios, args.agent_dataset, args.doctor_image_request, args.total_inferences, args.anthropic_api_key,)
